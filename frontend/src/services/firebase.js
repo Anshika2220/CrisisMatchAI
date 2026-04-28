@@ -12,12 +12,12 @@ import {
 } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyC_zLy7DdNI_OAWwMGZjoi7P4kx4kv46RQ",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "crisismatch.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "crisismatch",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "crisismatch.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "641271032758",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:641271032758:web:319e131a37da4823936f17",
 };
 
 if (!firebaseConfig.apiKey) {
