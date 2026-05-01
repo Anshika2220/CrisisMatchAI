@@ -245,12 +245,14 @@ const CHAT_TOOLS = [
 
 // Helper: Geocode for tool
 const geocodeTool = async (address) => {
+    if (!address || typeof address !== 'string') return null;
     try {
         const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`, {
             headers: { 'User-Agent': 'CrisisMatchAI/1.0', 'Accept-Language': 'en' }
         });
+        if (!res.ok) return null;
         const data = await res.json();
-        if (data.length > 0) {
+        if (Array.isArray(data) && data.length > 0) {
             return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
         }
     } catch (e) {
@@ -310,8 +312,13 @@ router.post('/chat', async (req, res) => {
                     continue;
                 }
 
-                let data = await resp.json();
-                let candidate = data?.candidates?.[0];
+                if (!data || !data.candidates) {
+                    console.error("Malformed Gemini response:", JSON.stringify(data));
+                    lastErr = new Error("Malformed response from AI model");
+                    continue;
+                }
+
+                let candidate = data.candidates[0];
                 let modelParts = candidate?.content?.parts || [];
 
                 // Handle Tool Calls
@@ -336,9 +343,9 @@ router.post('/chat', async (req, res) => {
                                 result = { error: "Could not find coordinates. Please ask user for a more specific address." };
                             } else {
                                 const newTask = {
-                                    title: args.title,
-                                    description: args.description,
-                                    location: coords,
+                                    title: args.title || "Crisis Report",
+                                    description: args.description || "Reported via AI Assistant",
+                                    location: taskCoords,
                                     urgencyScore: args.urgency_score || 3,
                                     requiredSkills: args.required_skills || [],
                                     status: 'Unassigned',
@@ -356,7 +363,7 @@ router.post('/chat', async (req, res) => {
                                         const volunteers = volsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
                                         let nearest = null, minDist = Infinity;
                                         for (const vol of volunteers) {
-                                            const d = calculateDistance(coords, vol.location);
+                                            const d = calculateDistance(taskCoords, vol.location);
                                             if (d < minDist) { minDist = d; nearest = vol; }
                                         }
                                         if (nearest) {
@@ -374,6 +381,7 @@ router.post('/chat', async (req, res) => {
                                     const id = makeId();
                                     memoryStore.tasks.push({ id, ...newTask });
                                     result = { success: true, taskId: id, message: "Reported (memory fallback)" };
+                                    capturedTaskId = id;
                                 }
                             }
                         } else if (name === 'find_volunteer') {
@@ -422,6 +430,12 @@ router.post('/chat', async (req, res) => {
                         body: JSON.stringify({ contents, tools: CHAT_TOOLS, generationConfig: { temperature: 0.1, maxOutputTokens: 256 } })
                     });
                     
+                    if (!resp.ok) {
+                        const detail = await resp.text();
+                        lastErr = new Error(`Gemini API (Step 2) ${resp.status}: ${detail}`);
+                        continue;
+                    }
+
                     data = await resp.json();
                     candidate = data?.candidates?.[0];
                     modelParts = candidate?.content?.parts || [];
