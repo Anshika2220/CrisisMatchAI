@@ -141,7 +141,13 @@ const ChatBot = () => {
               <div className="flex justify-start">
                 <div className="bg-[#282828] text-white border border-border/30 p-3 rounded-2xl rounded-tl-none flex items-center gap-2">
                   <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                  <span className="text-[10px] font-medium">Assistant is thinking...</span>
+                  <span className="text-[10px] font-medium italic">
+                    {message.toLowerCase().includes('report') || message.toLowerCase().includes('crisis') || message.toLowerCase().includes('at')
+                      ? "Analyzing situation & geocoding..." 
+                      : message.toLowerCase().includes('volunteer') || message.toLowerCase().includes('help')
+                      ? "Searching for nearest volunteers..."
+                      : "Assistant is thinking..."}
+                  </span>
                 </div>
               </div>
             )}

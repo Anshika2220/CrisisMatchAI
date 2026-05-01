@@ -202,13 +202,62 @@ router.get('/analytics/demand', async (req, res) => {
 // 7. AI Chatbot (Gemini API)
 // Note: the legacy SDK (`@google/generative-ai`) uses `v1beta` endpoints which can 404 for newer models.
 // We call the stable `v1` REST endpoint directly.
-const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-1.5-flash").trim();
 const GEMINI_FALLBACK_MODELS = [
     GEMINI_MODEL,
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
+    "gemini-2.0-flash-exp",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
 ];
+
+const CHAT_TOOLS = [
+  {
+    function_declarations: [
+      {
+        name: "report_crisis",
+        description: "Report a new crisis situation. Use this when the user describes a problem at a specific location.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Short title of the crisis (e.g., 'House Fire', 'Medical Emergency')" },
+            description: { type: "string", description: "Detailed description of the situation" },
+            location_name: { type: "string", description: "Human-readable address or location name (e.g., '123 Main St, Springfield')" },
+            urgency_score: { type: "integer", description: "Urgency level from 1 (minimal) to 5 (critical)" },
+            required_skills: { type: "array", items: { type: "string" }, description: "List of skills needed (e.g., ['First Aid', 'Firefighting'])" }
+          },
+          required: ["title", "description", "location_name"]
+        }
+      },
+      {
+        name: "find_volunteer",
+        description: "Find and assign the nearest volunteer to an existing task.",
+        parameters: {
+          type: "object",
+          properties: {
+            task_id: { type: "string", description: "The ID of the task to assign a volunteer to" }
+          },
+          required: ["task_id"]
+        }
+      }
+    ]
+  }
+];
+
+// Helper: Geocode for tool
+const geocodeTool = async (address) => {
+    try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`, {
+            headers: { 'User-Agent': 'CrisisMatchAI/1.0', 'Accept-Language': 'en' }
+        });
+        const data = await res.json();
+        if (data.length > 0) {
+            return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+        }
+    } catch (e) {
+        console.error("Tool geocoding failed:", e.message);
+    }
+    return null;
+};
 
 router.post('/chat', async (req, res) => {
     try {
@@ -218,51 +267,145 @@ router.post('/chat', async (req, res) => {
         const apiKey = (process.env.GEMINI_API_KEY || "").trim();
         if (!apiKey) return res.status(500).json({ error: "Server is missing GEMINI_API_KEY" });
 
-        const systemPrompt = `You are the CrisisMatch AI Assistant. Provide immediate, calm, and actionable first-aid advice.
-Prioritize life-saving actions. Remind the user help is on the way.`;
+        const systemPrompt = `You are the CrisisMatch AI Assistant. 
+        1. Provide immediate, calm, and actionable first-aid advice.
+        2. If a user reports a crisis with a location, use the 'report_crisis' tool to log it.
+        3. If a task is created, use 'find_volunteer' to get help immediately.
+        4. Remind the user help is on the way. Always prioritize life-saving actions.`;
 
-        const contents = Array.isArray(history) ? history : [];
-        contents.push({
-            role: "user",
-            parts: [{ text: `${systemPrompt}\n\nUser Message: ${message}` }]
-        });
+        let contents = Array.isArray(history) ? [...history] : [];
+        if (contents.length === 0 || contents[0].role !== 'user') {
+            contents.push({
+                role: "user",
+                parts: [{ text: `${systemPrompt}\n\nUser Message: ${message}` }]
+            });
+        } else {
+            contents.push({ role: "user", parts: [{ text: message }] });
+        }
 
         let lastErr;
         for (const modelName of GEMINI_FALLBACK_MODELS) {
-            const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-            const resp = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    contents,
-                    generationConfig: { temperature: 0.4, maxOutputTokens: 512 }
-                })
-            });
+            try {
+                const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+                
+                // Initial call to model
+                let resp = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        contents,
+                        tools: CHAT_TOOLS,
+                        generationConfig: { temperature: 0.2, maxOutputTokens: 1024 }
+                    })
+                });
 
-            if (!resp.ok) {
-                const detail = await resp.text().catch(() => "");
-                if ([404, 429, 503].includes(resp.status)) {
-                    lastErr = new Error(`Gemini API error ${resp.status} (model=${modelName}): ${detail}`);
+                if (!resp.ok) {
+                    const detail = await resp.text();
+                    lastErr = new Error(`Gemini API ${resp.status}: ${detail}`);
                     continue;
                 }
-                throw new Error(`Gemini API error ${resp.status} (model=${modelName}): ${detail}`);
+
+                let data = await resp.json();
+                let candidate = data?.candidates?.[0];
+                let modelParts = candidate?.content?.parts || [];
+
+                // Handle Tool Calls
+                const toolCalls = modelParts.filter(p => p.functionCall);
+                if (toolCalls.length > 0) {
+                    const toolResults = [];
+                    for (const call of toolCalls) {
+                        const { name, args } = call.functionCall;
+                        let result;
+
+                        if (name === 'report_crisis') {
+                            const coords = await geocodeTool(args.location_name);
+                            if (!coords) {
+                                result = { error: "Could not find coordinates for that location." };
+                            } else {
+                                const newTask = {
+                                    title: args.title,
+                                    description: args.description,
+                                    location: coords,
+                                    urgencyScore: args.urgency_score || 3,
+                                    requiredSkills: args.required_skills || [],
+                                    status: 'Unassigned',
+                                    assignedVolunteerId: null,
+                                    createdAt: new Date().toISOString()
+                                };
+                                try {
+                                    const docRef = await getDb().collection('tasks').add(newTask);
+                                    result = { success: true, taskId: docRef.id, message: "Crisis reported successfully." };
+                                } catch (e) {
+                                    const id = makeId();
+                                    memoryStore.tasks.push({ id, ...newTask });
+                                    result = { success: true, taskId: id, message: "Crisis reported (memory fallback)." };
+                                }
+                            }
+                        } else if (name === 'find_volunteer') {
+                            // Re-use logic from assign route
+                            const taskId = args.task_id;
+                            try {
+                                const taskDoc = await getDb().collection('tasks').doc(taskId).get();
+                                if (!taskDoc.exists) {
+                                    result = { error: "Task not found" };
+                                } else {
+                                    const volsSnap = await getDb().collection('volunteers').where('availability', '==', true).get();
+                                    const volunteers = volsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                                    const taskData = taskDoc.data();
+                                    
+                                    let nearest = null, minDist = Infinity;
+                                    for (const vol of volunteers) {
+                                        const d = calculateDistance(taskData.location, vol.location);
+                                        if (d < minDist) { minDist = d; nearest = vol; }
+                                    }
+                                    
+                                    if (nearest) {
+                                        await getDb().collection('tasks').doc(taskId).update({ status: 'Assigned', assignedVolunteerId: nearest.id });
+                                        await getDb().collection('volunteers').doc(nearest.id).update({ availability: false, assignedTask: taskId });
+                                        result = { success: true, volunteer: nearest.name, distanceKm: minDist.toFixed(2) };
+                                    } else {
+                                        result = { error: "No available volunteers found." };
+                                    }
+                                }
+                            } catch (e) {
+                                result = { error: "Volunteer search failed: " + e.message };
+                            }
+                        }
+
+                        toolResults.push({
+                            functionResponse: { name, response: { content: result } }
+                        });
+                    }
+
+                    // Second call with tool results
+                    contents.push(candidate.content);
+                    contents.push({ role: "function", parts: toolResults });
+
+                    resp = await fetch(url, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ contents, tools: CHAT_TOOLS })
+                    });
+                    
+                    data = await resp.json();
+                    candidate = data?.candidates?.[0];
+                    modelParts = candidate?.content?.parts || [];
+                }
+
+                const text = modelParts.map(p => p.text).filter(Boolean).join("");
+                if (text) return res.json({ response: text, model: modelName });
+                
+                lastErr = new Error("Empty response from model");
+            } catch (err) {
+                console.error(`Error with model ${modelName}:`, err.message);
+                lastErr = err;
             }
-
-            const data = await resp.json();
-            const text =
-                data?.candidates?.[0]?.content?.parts
-                    ?.map(p => p?.text)
-                    ?.filter(Boolean)
-                    ?.join("") || "";
-
-            if (text) return res.json({ response: text, model: modelName });
-            lastErr = new Error(`Empty Gemini response (model=${modelName})`);
         }
 
-        throw lastErr || new Error("Gemini request failed for all models");
+        throw lastErr || new Error("Chat service unavailable");
     } catch (err) {
         console.error("Chat API Error:", err);
-        res.status(503).json({ error: "The AI assistant is temporarily unavailable. Please try again shortly." });
+        res.status(503).json({ error: "I'm having trouble thinking right now. Please try again or call emergency services." });
     }
 });
 
