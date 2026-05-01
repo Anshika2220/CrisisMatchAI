@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MessageCircle, Send, X, Minus, ChevronUp, Bot, User, Loader2, Info } from 'lucide-react';
-import { sendChatMessage } from '../services/api';
+import { sendChatMessage, getTasks } from '../services/api';
+
 
 const ChatBot = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -9,6 +10,8 @@ const ChatBot = () => {
   const [chatHistory, setChatHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [userCoords, setUserCoords] = useState(null);
+  const [lastTaskId, setLastTaskId] = useState(null);
+  const [taskStatus, setTaskStatus] = useState(null);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
@@ -19,6 +22,29 @@ const ChatBot = () => {
       );
     }
   }, []);
+
+  useEffect(() => {
+    if (!lastTaskId || taskStatus === 'Assigned' || taskStatus === 'Completed') return;
+
+    const checkStatus = async () => {
+      try {
+        const tasks = await getTasks();
+        const myTask = tasks.find(t => t.id === lastTaskId);
+        if (myTask && myTask.status !== taskStatus) {
+          setTaskStatus(myTask.status);
+          if (myTask.status === 'Assigned') {
+            setChatHistory(prev => [...prev, { 
+              role: 'model', 
+              parts: [{ text: "✅ UPDATE: A volunteer has been assigned and is now en route to your location!" }] 
+            }]);
+          }
+        }
+      } catch (e) { console.error("Status check failed:", e); }
+    };
+
+    const interval = setInterval(checkStatus, 3000);
+    return () => clearInterval(interval);
+  }, [lastTaskId, taskStatus]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -44,6 +70,12 @@ const ChatBot = () => {
       const response = await sendChatMessage(message, chatHistory, userCoords);
       const aiMessage = { role: 'model', parts: [{ text: response.response }] };
       setChatHistory(prev => [...prev, aiMessage]);
+      
+      // Track newly created task for automatic updates
+      if (response.taskId) {
+        setLastTaskId(response.taskId);
+        setTaskStatus('Unassigned');
+      }
     } catch (error) {
       console.error("ChatBot handleSend Error:", error);
       const errorMessage = { 

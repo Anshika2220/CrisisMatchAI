@@ -288,6 +288,7 @@ router.post('/chat', async (req, res) => {
         }
 
         let lastErr;
+        let capturedTaskId = null;
         for (const modelName of GEMINI_FALLBACK_MODELS) {
             try {
                 const url = `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(apiKey)}`;
@@ -368,6 +369,7 @@ router.post('/chat', async (req, res) => {
                                     } catch (e) { assignmentResult = "Volunteer search pending."; }
 
                                     result = { success: true, taskId, status: "Reported & Dispatched", assignment: assignmentResult };
+                                    capturedTaskId = taskId;
                                 } catch (e) {
                                     const id = makeId();
                                     memoryStore.tasks.push({ id, ...newTask });
@@ -426,7 +428,7 @@ router.post('/chat', async (req, res) => {
                 }
 
                 const text = modelParts.map(p => p.text).filter(Boolean).join("");
-                if (text) return res.json({ response: text, model: modelName });
+                if (text) return res.json({ response: text, model: modelName, taskId: capturedTaskId });
                 
                 lastErr = new Error("Empty response from model");
             } catch (err) {
