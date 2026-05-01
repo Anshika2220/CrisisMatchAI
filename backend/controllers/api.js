@@ -261,23 +261,27 @@ const geocodeTool = async (address) => {
 
 router.post('/chat', async (req, res) => {
     try {
-        const { message, history } = req.body;
+        const { message, history, coords } = req.body;
         if (!message) return res.status(400).json({ error: "Message is required" });
 
         const apiKey = (process.env.GEMINI_API_KEY || "").trim();
         if (!apiKey) return res.status(500).json({ error: "Server is missing GEMINI_API_KEY" });
 
-        const systemPrompt = `You are the CrisisMatch AI Assistant. 
-        1. Provide immediate, calm, and actionable first-aid advice.
-        2. If a user reports a crisis with a location, use the 'report_crisis' tool to log it.
-        3. If a task is created, use 'find_volunteer' to get help immediately.
-        4. Remind the user help is on the way. Always prioritize life-saving actions.`;
+        const locationContext = coords ? `(User is at Lat: ${coords.lat}, Lng: ${coords.lng})` : "(Location unknown)";
+
+        const systemPrompt = `EMERGENCY PROTOCOL: You are CrisisMatch AI. 
+        - BE EXTREMELY CONCISE.
+        - If the user is in danger or mentions an emergency, IMMEDIATELY call 'report_crisis'. 
+        - Use the coordinates in 'Context' if the user doesn't provide a specific address or says "here".
+        - After reporting, the system automatically dispatches help.
+        - End with ONE critical question (e.g., "Any injuries?", "How many victims?").
+        - Goal: ZERO delay in reporting.`;
 
         let contents = Array.isArray(history) ? [...history] : [];
-        if (contents.length === 0 || contents[0].role !== 'user') {
+        if (contents.length === 0 || (contents.length > 0 && contents[0].role !== 'user')) {
             contents.push({
                 role: "user",
-                parts: [{ text: `${systemPrompt}\n\nUser Message: ${message}` }]
+                parts: [{ text: `${systemPrompt}\n\nContext: ${locationContext}\n\nUser: ${message}` }]
             });
         } else {
             contents.push({ role: "user", parts: [{ text: message }] });
@@ -295,7 +299,7 @@ router.post('/chat', async (req, res) => {
                     body: JSON.stringify({
                         contents,
                         tools: CHAT_TOOLS,
-                        generationConfig: { temperature: 0.2, maxOutputTokens: 1024 }
+                        generationConfig: { temperature: 0.1, maxOutputTokens: 256 }
                     })
                 });
 
@@ -318,9 +322,17 @@ router.post('/chat', async (req, res) => {
                         let result;
 
                         if (name === 'report_crisis') {
-                            const coords = await geocodeTool(args.location_name);
-                            if (!coords) {
-                                result = { error: "Could not find coordinates for that location." };
+                            let taskCoords = null;
+                            const locName = (args.location_name || "").toLowerCase();
+                            
+                            if ((locName === "here" || locName === "current location" || !args.location_name) && coords) {
+                                taskCoords = coords;
+                            } else {
+                                taskCoords = await geocodeTool(args.location_name);
+                            }
+
+                            if (!taskCoords) {
+                                result = { error: "Could not find coordinates. Please ask user for a more specific address." };
                             } else {
                                 const newTask = {
                                     title: args.title,
@@ -334,11 +346,32 @@ router.post('/chat', async (req, res) => {
                                 };
                                 try {
                                     const docRef = await getDb().collection('tasks').add(newTask);
-                                    result = { success: true, taskId: docRef.id, message: "Crisis reported successfully." };
+                                    const taskId = docRef.id;
+                                    
+                                    // PROACTIVE: Automatically try to find a volunteer immediately
+                                    let assignmentResult = "Searching for volunteer...";
+                                    try {
+                                        const volsSnap = await getDb().collection('volunteers').where('availability', '==', true).get();
+                                        const volunteers = volsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                                        let nearest = null, minDist = Infinity;
+                                        for (const vol of volunteers) {
+                                            const d = calculateDistance(coords, vol.location);
+                                            if (d < minDist) { minDist = d; nearest = vol; }
+                                        }
+                                        if (nearest) {
+                                            await getDb().collection('tasks').doc(taskId).update({ status: 'Assigned', assignedVolunteerId: nearest.id });
+                                            await getDb().collection('volunteers').doc(nearest.id).update({ availability: false, assignedTask: taskId });
+                                            assignmentResult = `Assigned nearest volunteer: ${nearest.name} (~${minDist.toFixed(1)}km away)`;
+                                        } else {
+                                            assignmentResult = "No volunteers currently available in range.";
+                                        }
+                                    } catch (e) { assignmentResult = "Volunteer search pending."; }
+
+                                    result = { success: true, taskId, status: "Reported & Dispatched", assignment: assignmentResult };
                                 } catch (e) {
                                     const id = makeId();
                                     memoryStore.tasks.push({ id, ...newTask });
-                                    result = { success: true, taskId: id, message: "Crisis reported (memory fallback)." };
+                                    result = { success: true, taskId: id, message: "Reported (memory fallback)" };
                                 }
                             }
                         } else if (name === 'find_volunteer') {
@@ -384,7 +417,7 @@ router.post('/chat', async (req, res) => {
                     resp = await fetch(url, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ contents, tools: CHAT_TOOLS })
+                        body: JSON.stringify({ contents, tools: CHAT_TOOLS, generationConfig: { temperature: 0.1, maxOutputTokens: 256 } })
                     });
                     
                     data = await resp.json();

@@ -8,7 +8,17 @@ const ChatBot = () => {
   const [message, setMessage] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [userCoords, setUserCoords] = useState(null);
   const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setUserCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        (err) => console.warn("Chat Geolocation failed:", err.message)
+      );
+    }
+  }, []);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -30,8 +40,8 @@ const ChatBot = () => {
     setIsLoading(true);
 
     try {
-      // We pass the history excluding the last message to the backend
-      const response = await sendChatMessage(message, chatHistory);
+      // Pass coordinates for instant reporting
+      const response = await sendChatMessage(message, chatHistory, userCoords);
       const aiMessage = { role: 'model', parts: [{ text: response.response }] };
       setChatHistory(prev => [...prev, aiMessage]);
     } catch (error) {

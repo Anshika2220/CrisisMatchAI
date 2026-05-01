@@ -48,7 +48,7 @@ export const getDemandAnalytics = async () => {
   return response.data;
 };
 
-export const sendChatMessage = async (message, history = []) => {
-  const response = await axios.post(`${API_BASE_URL}/chat`, { message, history });
+export const sendChatMessage = async (message, history = [], coords = null) => {
+  const response = await axios.post(`${API_BASE_URL}/chat`, { message, history, coords });
   return response.data;
 };
