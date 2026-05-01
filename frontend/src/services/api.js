@@ -1,6 +1,12 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://crisismatchai.onrender.com';
+let API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://crisismatchai.onrender.com/api';
+
+// Robustness: Ensure it ends with /api and has no trailing slash
+API_BASE_URL = API_BASE_URL.replace(/\/+$/, '');
+if (!API_BASE_URL.endsWith('/api')) {
+  API_BASE_URL += '/api';
+}
 
 export const addVolunteer = async (volunteerData) => {
   const response = await axios.post(`${API_BASE_URL}/volunteers`, volunteerData);
